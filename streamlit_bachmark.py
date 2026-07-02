@@ -9,7 +9,37 @@ import matplotlib.pyplot as plt
 from pathlib import Path
 from ultralytics import YOLO
 import shap
+import platform
+import matplotlib
+from matplotlib import font_manager
 
+system = platform.system()
+
+if system == "Windows":
+    # Windows
+    matplotlib.rcParams["font.family"] = "Malgun Gothic"
+elif system == "Linux":
+    # Linux（Ubuntu、Streamlit Cloud 等）
+    candidates = [
+        "NanumGothic",
+        "Noto Sans CJK KR",
+        "Noto Sans CJK JP",
+        "Noto Sans CJK SC",
+        "Noto Sans CJK TC",
+        "DejaVu Sans"
+    ]
+
+    available = {f.name for f in font_manager.fontManager.ttflist}
+
+    for font in candidates:
+        if font in available:
+            matplotlib.rcParams["font.family"] = font
+            break
+else:
+    # macOS
+    matplotlib.rcParams["font.family"] = "AppleGothic"
+
+matplotlib.rcParams["axes.unicode_minus"] = False
 # ========================== 🛠️ 페이지 전역 설정 ==========================
 st.set_page_config(
     page_title="YOLOv11 드론 정밀 분석 및 설명가능한 AI(XAI) 시스템",
@@ -42,6 +72,7 @@ pt_model, ov_model, error_msg = load_models(PT_MODEL_PATH, OV_MODEL_DIR)
 if error_msg:
     st.error(f"❌ 모델 초기화 실패! 지정된 경로에 가중치 파일이 존재하는지 확인하십시오:\n1. PyTorch: `{PT_MODEL_PATH}`\n2. OpenVINO: `{OV_MODEL_DIR}`\n\n상세 오류: {error_msg}")
     st.stop()
+
 
 # ========================== 🏠 Streamlit 메인 화면 인터페이스 ==========================
 st.title("🎯 YOLOv11 드론 탐지 멀티 엔진 성능 검증 및 SHAP 기여도 분석 시스템")
@@ -81,9 +112,17 @@ benchmark_runs = st.sidebar.slider("성능 테스트 횟수 (Benchmark)", min_va
 # 3. SHAP 수학적 가시화 정밀도 설정
 st.sidebar.markdown("---")
 st.sidebar.subheader("🧩 SHAP 시각화 정밀도")
-max_evals = st.sidebar.slider("SHAP 탐색 횟수 (Max Evals)", min_value=100, max_value=1500, value=800, step=50, help="값이 클수록 픽셀 기여도가 정교해지지만, 계산 지연이 늘어납니다.")
-grid_size = st.sidebar.selectbox("분할 그리드(Grid) 크기", options=[12, 16, 20], index=1)
-batch_size = st.sidebar.slider("SHAP 배치 크기 (Batch Size)", min_value=1, max_value=16, value=4, step=1)
+enable_shap = st.sidebar.toggle(
+    "SHAP 설명가능성 분석 활성화",
+    value=True,
+    help="비활성화하면 성능 벤치마크와 객체 탐지만 실행하여 분석 시간을 크게 줄입니다."
+)
+if enable_shap:
+    max_evals = st.sidebar.slider("SHAP 탐색 횟수 (Max Evals)", min_value=100, max_value=1500, value=800, step=50, help="값이 클수록 픽셀 기여도가 정교해지지만, 계산 지연이 늘어납니다.")
+    grid_size = st.sidebar.selectbox("분할 그리드(Grid) 크기", options=[12, 16, 20], index=1)
+    batch_size = st.sidebar.slider("SHAP 배치 크기 (Batch Size)", min_value=1, max_value=16, value=4, step=1)
+else:
+    st.sidebar.info("SHAP 분석이 꺼져 있어 성능 벤치마크만 실행됩니다.")
 
 st.sidebar.markdown("---")
 st.sidebar.caption("💡 본 시스템은 Streamlit 컨테이너 배포 표준을 준수하며 클라우드 가상화 인프라 환경에서 원활히 작동합니다.")
@@ -271,75 +310,84 @@ with tab_image:
                 benchmark_results[cfg_name] = {"latency": avg_l, "fps": fps_val, "conf": c_max, "count": box_count}
                 annotated_frames[cfg_name] = cv2.cvtColor(res_temp.plot(), cv2.COLOR_BGR2RGB)
 
-            # --- 파트 B: XAI 설명가능성 SHAP 연산 단계 ---
-            base_step = len(configs)*2
-            step_status.text(f"⏳ [단계 {base_step + 1} / {base_step + 6}] SHAP 마스킹 타겟 분할 및 가상 배경 동기화 수립 중...")
-            step_progress.progress(45)
-            
-            bg_reference = np.ones_like(img_input) * 0.5 
-            
-            def custom_masker(mask):
-                B = mask.shape[0]
-                masked_imgs = []
-                mask_2d = mask.reshape(-1, grid_size, grid_size)
-                for i in range(B):
-                    mask_upscaled = cv2.resize(mask_2d[i].astype(np.uint8), (640, 640), interpolation=cv2.INTER_NEAREST)
-                    mask_3d = np.expand_dims(mask_upscaled, axis=-1)
-                    out_img = img_input * mask_3d + bg_reference * (1 - mask_3d)
-                    masked_imgs.append(out_img)
-                return np.array(masked_imgs)
+            if enable_shap:
+                # --- 파트 B: XAI 설명가능성 SHAP 연산 단계 ---
+                base_step = len(configs)*2
+                step_status.text(f"⏳ [단계 {base_step + 1} / {base_step + 6}] SHAP 마스킹 타겟 분할 및 가상 배경 동기화 수립 중...")
+                step_progress.progress(45)
+                
+                bg_reference = np.ones_like(img_input) * 0.5 
+                
+                def custom_masker(mask):
+                    B = mask.shape[0]
+                    masked_imgs = []
+                    mask_2d = mask.reshape(-1, grid_size, grid_size)
+                    for i in range(B):
+                        mask_upscaled = cv2.resize(mask_2d[i].astype(np.uint8), (640, 640), interpolation=cv2.INTER_NEAREST)
+                        mask_3d = np.expand_dims(mask_upscaled, axis=-1)
+                        out_img = img_input * mask_3d + bg_reference * (1 - mask_3d)
+                        masked_imgs.append(out_img)
+                    return np.array(masked_imgs)
 
-            def predict_pt(img_numpy_batch):
-                outputs = []
-                for img_np in img_numpy_batch:
-                    img_bgr_in = (img_np * 255).astype(np.uint8)
-                    results = pt_model(img_bgr_in, device=gpu_device, verbose=False)
-                    boxes = results[0].boxes
-                    uav_conf = float(torch.max(boxes.conf)) if len(boxes) > 0 else 0.0
-                    outputs.append([1.0 - uav_conf, uav_conf])
-                return np.array(outputs)
+                def predict_pt(img_numpy_batch):
+                    outputs = []
+                    for img_np in img_numpy_batch:
+                        img_bgr_in = (img_np * 255).astype(np.uint8)
+                        results = pt_model(img_bgr_in, device=gpu_device, verbose=False)
+                        boxes = results[0].boxes
+                        uav_conf = float(torch.max(boxes.conf)) if len(boxes) > 0 else 0.0
+                        outputs.append([1.0 - uav_conf, uav_conf])
+                    return np.array(outputs)
 
-            def predict_ov(img_numpy_batch):
-                outputs = []
-                for img_np in img_numpy_batch:
-                    img_bgr_in = (img_np * 255).astype(np.uint8)
-                    results = ov_model(img_bgr_in, device='cpu', verbose=False)
-                    boxes = results[0].boxes
-                    uav_conf = float(np.max(boxes.conf.cpu().numpy())) if len(boxes) > 0 else 0.0
-                    outputs.append([1.0 - uav_conf, uav_conf])
-                return np.array(outputs)
+                def predict_ov(img_numpy_batch):
+                    outputs = []
+                    for img_np in img_numpy_batch:
+                        img_bgr_in = (img_np * 255).astype(np.uint8)
+                        results = ov_model(img_bgr_in, device='cpu', verbose=False)
+                        boxes = results[0].boxes
+                        uav_conf = float(np.max(boxes.conf.cpu().numpy())) if len(boxes) > 0 else 0.0
+                        outputs.append([1.0 - uav_conf, uav_conf])
+                    return np.array(outputs)
 
-            num_features = grid_size * grid_size
-            pt_f = lambda m: predict_pt(custom_masker(m))
-            ov_f = lambda m: predict_ov(custom_masker(m))
-            
-            # 🚨 SHAP 필수 하한 조건 방어 코드: 사용자 슬라이더 조작 미스로 인한 수학적 ValueError 차단
-            required_min_evals = 2 * num_features + 1
-            if max_evals < required_min_evals:
-                max_evals = required_min_evals
+                num_features = grid_size * grid_size
+                pt_f = lambda m: predict_pt(custom_masker(m))
+                ov_f = lambda m: predict_ov(custom_masker(m))
+                
+                # 🚨 SHAP 필수 하한 조건 방어 코드: 사용자 슬라이더 조작 미스로 인한 수학적 ValueError 차단
+                required_min_evals = 2 * num_features + 1
+                if max_evals < required_min_evals:
+                    max_evals = required_min_evals
 
-            step_status.text(f"⏳ [단계 {base_step + 2} / {base_step + 6}] PyTorch 핵심 기여도 탐색을 위한 {max_evals}회 미시 연산 중...")
-            step_progress.progress(65)
-            explainer_pt = shap.Explainer(pt_f, shap.maskers.Independent(np.zeros((1, num_features))))
-            shap_values_pt = explainer_pt(np.ones((1, num_features)), max_evals=max_evals, batch_size=batch_size)
-            
-            step_status.text(f"⏳ [단계 {base_step + 3} / {base_step + 6}] OpenVINO 최적화 분기 탐색을 위한 {max_evals}회 가중치 추적 연산 중...")
-            step_progress.progress(85)
-            explainer_ov = shap.Explainer(ov_f, shap.maskers.Independent(np.zeros((1, num_features))))
-            shap_values_ov = explainer_ov(np.ones((1, num_features)), max_evals=max_evals, batch_size=batch_size)
-            
-            step_status.text(f"⏳ [단계 {base_step + 4} / {base_step + 6}] 샤플리 기여도 정합 대조 맵 2차원 공간 선형 보간 생성 중...")
-            step_progress.progress(95)
-            pt_values = shap_values_pt.values[0, :, 1].reshape(grid_size, grid_size)
-            ov_values = shap_values_ov.values[0, :, 1].reshape(grid_size, grid_size)
-            pt_heatmap = cv2.resize(pt_values, (640, 640), interpolation=cv2.INTER_LINEAR)
-            ov_heatmap = cv2.resize(ov_values, (640, 640), interpolation=cv2.INTER_LINEAR)
-            
-            step_progress.progress(100)
-            step_status.empty()
-            step_progress.empty()
-            
-            st.success("🎉 정밀 종합 진단 모델 및 XAI 기여도 보고서가 출력되었습니다!")
+                step_status.text(f"⏳ [단계 {base_step + 2} / {base_step + 6}] PyTorch 핵심 기여도 탐색을 위한 {max_evals}회 미시 연산 중...")
+                step_progress.progress(65)
+                explainer_pt = shap.Explainer(pt_f, shap.maskers.Independent(np.zeros((1, num_features))))
+                shap_values_pt = explainer_pt(np.ones((1, num_features)), max_evals=max_evals, batch_size=batch_size)
+                
+                step_status.text(f"⏳ [단계 {base_step + 3} / {base_step + 6}] OpenVINO 최적화 분기 탐색을 위한 {max_evals}회 가중치 추적 연산 중...")
+                step_progress.progress(85)
+                explainer_ov = shap.Explainer(ov_f, shap.maskers.Independent(np.zeros((1, num_features))))
+                shap_values_ov = explainer_ov(np.ones((1, num_features)), max_evals=max_evals, batch_size=batch_size)
+                
+                step_status.text(f"⏳ [단계 {base_step + 4} / {base_step + 6}] 샤플리 기여도 정합 대조 맵 2차원 공간 선형 보간 생성 중...")
+                step_progress.progress(95)
+                pt_values = shap_values_pt.values[0, :, 1].reshape(grid_size, grid_size)
+                ov_values = shap_values_ov.values[0, :, 1].reshape(grid_size, grid_size)
+                pt_heatmap = cv2.resize(pt_values, (640, 640), interpolation=cv2.INTER_LINEAR)
+                ov_heatmap = cv2.resize(ov_values, (640, 640), interpolation=cv2.INTER_LINEAR)
+                
+                step_progress.progress(100)
+                step_status.empty()
+                step_progress.empty()
+                
+                st.success("🎉 정밀 종합 진단 모델 및 XAI 기여도 보고서가 출력되었습니다!")
+            else:
+                step_status.text("✅ SHAP 분석을 건너뛰고 성능 벤치마크 결과를 정리하는 중입니다...")
+                step_progress.progress(100)
+                time.sleep(0.3)
+                step_status.empty()
+                step_progress.empty()
+                
+                st.success("🎉 성능 벤치마크 및 객체 탐지 결과가 출력되었습니다! SHAP 분석은 비활성화되었습니다.")
             
             # 성능 가속화 지표 정량 데이터 산출
             pt_cpu_lat = benchmark_results["PyTorch (CPU)"]["latency"]
@@ -396,32 +444,35 @@ with tab_image:
                 
             st.markdown("---")
             
-            # 3. SHAP 기여도 열지도 대조군
-            st.markdown("### 🔮 피쳐 가중치 기여도 분포 맵 비교 (SHAP Interpretability)")
-            st.info("💡 SHAP 기여도 해석 가이드: 【빨간색 영역】은 드론 객체 탐지 확률을 높이는 데 기여한 영역(기체 외곽선, 프로펠러 등)입니다. 반대로 【파란색 영역】은 인공지능 탐지 결정에 악영향을 준 방해 및 오인지 노이즈 요소를 나타냅니다.")
-            
-            fig_shap, axes_shap = plt.subplots(1, 2, figsize=(14, 6))
-            v_max = max(np.max(np.abs(pt_heatmap)), np.max(np.abs(ov_heatmap)))
-            
-            axes_shap[0].imshow(img_640_rgb)
-            im0 = axes_shap[0].imshow(pt_heatmap, cmap='seismic', alpha=0.5, vmin=-v_max, vmax=v_max)
-            axes_shap[0].set_title("SHAP Explanation - PyTorch (.pt)", fontsize=12, fontweight='bold')
-            axes_shap[0].axis('off')
-            
-            axes_shap[1].imshow(img_640_rgb)
-            im1 = axes_shap[1].imshow(ov_heatmap, cmap='seismic', alpha=0.5, vmin=-v_max, vmax=v_max)
-            axes_shap[1].set_title("SHAP Explanation - OpenVINO (INT8)", fontsize=12, fontweight='bold')
-            axes_shap[1].axis('off')
-            
-            cbar_ax = fig_shap.add_axes([0.25, 0.05, 0.5, 0.03])
-            cbar = fig_shap.colorbar(im1, cax=cbar_ax, orientation='horizontal')
-            cbar.set_label("Shapley 기여치 분배 척도 (빨강: 긍정적 기여치 | 파랑: 방해 요소)", fontsize=10, fontweight='bold')
-            
-            col_s1, col_s2 = st.columns([4, 1])
-            with col_s1:
-                st.pyplot(fig_shap)
+            if enable_shap:
+                # 3. SHAP 기여도 열지도 대조군
+                st.markdown("### 🔮 피쳐 가중치 기여도 분포 맵 비교 (SHAP Interpretability)")
+                st.info("💡 SHAP 기여도 해석 가이드: 【빨간색 영역】은 드론 객체 탐지 확률을 높이는 데 기여한 영역(기체 외곽선, 프로펠러 등)입니다. 반대로 【파란색 영역】은 인공지능 탐지 결정에 악영향을 준 방해 및 오인지 노이즈 요소를 나타냅니다.")
                 
-            st.markdown("---")
+                fig_shap, axes_shap = plt.subplots(1, 2, figsize=(14, 6))
+                v_max = max(np.max(np.abs(pt_heatmap)), np.max(np.abs(ov_heatmap)))
+                
+                axes_shap[0].imshow(img_640_rgb)
+                im0 = axes_shap[0].imshow(pt_heatmap, cmap='seismic', alpha=0.5, vmin=-v_max, vmax=v_max)
+                axes_shap[0].set_title("SHAP Explanation - PyTorch (.pt)", fontsize=12, fontweight='bold')
+                axes_shap[0].axis('off')
+                
+                axes_shap[1].imshow(img_640_rgb)
+                im1 = axes_shap[1].imshow(ov_heatmap, cmap='seismic', alpha=0.5, vmin=-v_max, vmax=v_max)
+                axes_shap[1].set_title("SHAP Explanation - OpenVINO (INT8)", fontsize=12, fontweight='bold')
+                axes_shap[1].axis('off')
+                
+                cbar_ax = fig_shap.add_axes([0.25, 0.05, 0.5, 0.03])
+                cbar = fig_shap.colorbar(im1, cax=cbar_ax, orientation='horizontal')
+                cbar.set_label("Shapley 기여치 분배 척도 (빨강: 긍정적 기여치 | 파랑: 방해 요소)", fontsize=10, fontweight='bold')
+                
+                col_s1, col_s2 = st.columns([4, 1])
+                with col_s1:
+                    st.pyplot(fig_shap)
+                    
+                st.markdown("---")
+            else:
+                st.info("🧩 SHAP 설명가능성 분석이 비활성화되어 기여도 열지도는 생성하지 않았습니다.")
             
             # 4. 정밀 벤치마킹 데이터 차트
             st.markdown("### 📊 정밀 벤치마크 처리 성능 비교 (지연 시간 vs 실시간 처리 프레임률)")
